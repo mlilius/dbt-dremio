@@ -1,5 +1,9 @@
 # dbt-dremio v1.10.0
 
+## Features
+
+- **DREMIO_SUBQUERY**: Added support for dynamic query result substitution using `/* DREMIO_SUBQUERY: ... */` syntax. This feature allows you to substitute the results of a subquery directly into your SQL before execution, particularly useful for Iceberg table pruning and incremental predicates. See [documentation](docs/dremio_subquery.md) for details.
+
 ## Changes
 
 - Updated dbt-dremio to match dbt-core v1.10 with sample mode

@@ -42,6 +42,10 @@
     - [Using a `.env` File](#using-a-env-file)
       - [Loading a .env file into the active shell](#loading-a-env-file-into-the-active-shell)
   - [Best Practices for Using Environment Variables](#best-practices-for-using-environment-variables)
+- [DREMIO_SUBQUERY Feature](#dremio_subquery-feature)
+  - [Overview](#overview-1)
+  - [Syntax and Usage](#syntax-and-usage)
+  - [Common Use Cases](#common-use-cases)
 - [Further Reading](#further-reading)
 
 
@@ -640,6 +644,49 @@ Explanation:
 - **Adapt to Multiple Environments**: Use environment variables to switch between development, staging, and production seamlessly.
 
 By leveraging environment variables effectively, you can make your dbt projects more dynamic, secure, and adaptable to any environment.
+
+## DREMIO_SUBQUERY Feature
+
+The `DREMIO_SUBQUERY` feature enables dynamic query result substitution in your SQL statements. This is particularly powerful for incremental materializations where you need literal values for Iceberg table partition pruning.
+
+### Overview
+
+`DREMIO_SUBQUERY` uses a special SQL comment syntax that gets automatically replaced with the results of executing that subquery before your SQL is sent to Dremio. This allows you to create dynamic predicates that adapt based on your data.
+
+**Key Benefits:**
+- Enable partition pruning in incremental models
+- Dynamic predicate values based on actual data
+- Automatic handling of MERGE statement aliases
+- Type-aware formatting of results
+
+### Syntax and Usage
+
+Use the following syntax anywhere in your SQL:
+
+```sql
+/* DREMIO_SUBQUERY: <your_subquery> */
+```
+
+**Example in Incremental Predicate:**
+
+```sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key=['id'],
+    incremental_predicates=[
+        "DATE_TRUNC('day', DBT_INTERNAL_DEST.timestamp) IN (/* DREMIO_SUBQUERY: SELECT DISTINCT DATE_TRUNC('day', timestamp) FROM DBT_INTERNAL_SOURCE */)"
+    ]
+) }}
+```
+
+### Common Use Cases
+
+1. **Partition Pruning**: Filter incremental merges to only process specific partitions
+2. **Dynamic Date Ranges**: Use MAX/MIN dates from source data in predicates
+3. **Status Filtering**: Filter by distinct status values from another table
+
+For complete documentation, examples, and best practices, see the [DREMIO_SUBQUERY documentation](dremio_subquery.md).
 
 ## Further Reading
 - [dbt-dremio materialization and incremental features](https://github.com/dremio/dbt-dremio/wiki/Using-Materializations-with-Dremio)
