@@ -651,21 +651,30 @@ The `DREMIO_SUBQUERY` feature enables dynamic query result substitution in your 
 
 ### Overview
 
-`DREMIO_SUBQUERY` uses a special SQL comment syntax that gets automatically replaced with the results of executing that subquery before your SQL is sent to Dremio. This allows you to create dynamic predicates that adapt based on your data.
+`DREMIO_SUBQUERY` uses special syntax that gets automatically replaced with the results of executing that subquery before your SQL is sent to Dremio. This allows you to create dynamic predicates that adapt based on your data.
 
 **Key Benefits:**
 - Enable partition pruning in incremental models
 - Dynamic predicate values based on actual data
 - Automatic handling of MERGE statement aliases
 - Type-aware formatting of results
+- Support for nested patterns
 
 ### Syntax and Usage
 
-Use the following syntax anywhere in your SQL:
+Two syntax options are available:
 
+**Comment syntax (recommended):**
 ```sql
 /* DREMIO_SUBQUERY: <your_subquery> */
 ```
+
+**Curly bracket syntax:**
+```sql
+{ SELECT <your_subquery> }
+```
+
+Both syntaxes are functionally equivalent. You can even nest them - for example, a `DREMIO_SUBQUERY` comment can contain a curly bracket subquery.
 
 **Example in Incremental Predicate:**
 

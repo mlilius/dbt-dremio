@@ -85,24 +85,24 @@ class DremioCursor:
         if bindings is None:
             self._initialize()
 
-            # Process DREMIO_SUBQUERY substitutions before executing
+            # Process DREMIO_SUBQUERY and curly bracket subquery substitutions before executing
             # Skip for sub-queries to avoid infinite recursion
             if not skip_subquery_substitution:
                 original_sql = sql
                 sql = self._substitute_dremio_subqueries(sql)
                 if sql != original_sql:
-                    logger.debug("DREMIO_SUBQUERY substitution completed. SQL modified.")
+                    logger.debug("Subquery substitution completed. SQL modified.")
                     # Log the full substituted SQL at debug level for detailed troubleshooting
                     logger.debug("=" * 80)
-                    logger.debug("FINAL SQL (after DREMIO_SUBQUERY substitution):")
+                    logger.debug("FINAL SQL (after subquery substitution):")
                     logger.debug("=" * 80)
                     logger.debug(sql)
                     logger.debug("=" * 80)
                     # Verify all patterns were replaced
-                    if "/* DREMIO_SUBQUERY:" not in sql:
-                        logger.debug("All DREMIO_SUBQUERY patterns successfully replaced")
+                    if "/* DREMIO_SUBQUERY:" not in sql and re.search(r'{\s*SELECT\s+', sql, re.IGNORECASE | re.DOTALL) is None:
+                        logger.debug("All subquery patterns successfully replaced")
                     else:
-                        logger.warning("Some DREMIO_SUBQUERY patterns remain after substitution")
+                        logger.warning("Some subquery patterns remain after substitution")
 
             json_payload = self._rest_client.sql_endpoint(sql, context=None)
 
@@ -219,24 +219,14 @@ class DremioCursor:
 
     def _substitute_dremio_subqueries(self, sql: str) -> str:
         """
-        Find and replace all /* DREMIO_SUBQUERY: ... */ patterns with their query results.
+        Find and replace all /* DREMIO_SUBQUERY: ... */ and { SELECT ... } patterns with their query results.
         
         Args:
-            sql: The SQL string that may contain DREMIO_SUBQUERY patterns
+            sql: The SQL string that may contain DREMIO_SUBQUERY patterns or curly bracket subqueries
             
         Returns:
             SQL string with DREMIO_SUBQUERY patterns replaced by their results
         """
-        # Pattern to match /* DREMIO_SUBQUERY: ... */ (with DOTALL for multi-line)
-        pattern = r'/\*\s*DREMIO_SUBQUERY:\s*(.*?)\s*\*/'
-        
-        # Check if there are any matches first
-        matches = list(re.finditer(pattern, sql, flags=re.DOTALL))
-        if not matches:
-            return sql  # No DREMIO_SUBQUERY patterns found, return as-is
-        
-        logger.debug(f"Found {len(matches)} DREMIO_SUBQUERY pattern(s) to process")
-        
         # Extract MERGE statement context to resolve DBT_INTERNAL_SOURCE and DBT_INTERNAL_DEST aliases
         merge_source_relation = None
         merge_dest_relation = None
@@ -252,18 +242,69 @@ class DremioCursor:
             merge_source_relation = merge_match.group(2).strip()
             logger.debug(f"Found MERGE context: DBT_INTERNAL_DEST={merge_dest_relation}, DBT_INTERNAL_SOURCE={merge_source_relation}")
         
+        # Process DREMIO_SUBQUERY patterns first (/* DREMIO_SUBQUERY: ... */)
+        sql = self._process_subquery_pattern(
+            sql, 
+            r'/\*\s*DREMIO_SUBQUERY:\s*(.*?)\s*\*/',
+            "DREMIO_SUBQUERY",
+            merge_source_relation,
+            merge_dest_relation
+        )
+        
+        # Then process curly bracket patterns ({ SELECT ... })
+        # Note: This pattern matches { SELECT ... } where the SELECT statement can span multiple lines
+        # dbt templates like {{ this }} are already processed before this code runs, so nested
+        # brackets in templates won't cause issues
+        sql = self._process_subquery_pattern(
+            sql,
+            r'{\s*(SELECT\s+.*?)\s*}',
+            "curly bracket subquery",
+            merge_source_relation,
+            merge_dest_relation
+        )
+        
+        return sql
+
+    def _process_subquery_pattern(
+        self, 
+        sql: str, 
+        pattern: str, 
+        pattern_name: str,
+        merge_source_relation: str = None,
+        merge_dest_relation: str = None
+    ) -> str:
+        """
+        Process a specific subquery pattern and replace it with query results.
+        
+        Args:
+            sql: The SQL string that may contain the pattern
+            pattern: Regex pattern to match
+            pattern_name: Name of the pattern for logging (e.g., "DREMIO_SUBQUERY")
+            merge_source_relation: Source relation name for MERGE context
+            merge_dest_relation: Destination relation name for MERGE context
+            
+        Returns:
+            SQL string with patterns replaced by their results
+        """
+        # Check if there are any matches first
+        matches = list(re.finditer(pattern, sql, flags=re.DOTALL | re.IGNORECASE))
+        if not matches:
+            return sql  # No patterns found, return as-is
+        
+        logger.debug(f"Found {len(matches)} {pattern_name} pattern(s) to process")
+        
         def replace_subquery(match):
             subquery_sql = match.group(1).strip()
-            logger.debug(f"Processing DREMIO_SUBQUERY: {subquery_sql[:200]}...")
+            logger.debug(f"Processing {pattern_name}: {subquery_sql[:200]}...")
             
-            # Check if this DREMIO_SUBQUERY is in an IN clause context
-            # Look for "IN" keyword before the comment (with optional whitespace and optional opening paren)
+            # Check if this subquery is in an IN clause context
+            # Look for "IN" keyword before the pattern (with optional whitespace and optional opening paren)
             match_start = match.start()
             # Look back up to 100 characters to find "IN" keyword
             context_before = sql[max(0, match_start - 100):match_start]
-            # Pattern: word boundary, "IN", optional whitespace, optional "(", then whitespace/comment
-            is_in_clause = re.search(r'\bIN\s*\(?\s*(?:/\*|$)', context_before, re.IGNORECASE) is not None
-            # Check if there's already an opening parenthesis right before the DREMIO_SUBQUERY
+            # Pattern: word boundary, "IN", optional whitespace, optional "(", then whitespace
+            is_in_clause = re.search(r'\bIN\s*\(?\s*$', context_before, re.IGNORECASE) is not None
+            # Check if there's already an opening parenthesis right before the subquery
             has_opening_paren = context_before.rstrip().endswith('(')
             
             # Replace MERGE aliases with actual relation names if found
@@ -278,6 +319,33 @@ class DremioCursor:
             
             subquery_cursor = None
             try:
+                # Process nested patterns in the subquery SQL before executing
+                # This allows patterns like DREMIO_SUBQUERY containing { SELECT ... } or vice versa
+                if pattern_name == "DREMIO_SUBQUERY":
+                    # Process curly bracket patterns in the extracted subquery SQL
+                    curly_pattern = r'{\s*(SELECT\s+.*?)\s*}'
+                    if re.search(curly_pattern, subquery_sql, flags=re.DOTALL | re.IGNORECASE):
+                        logger.debug(f"Found curly bracket pattern inside {pattern_name}, processing it first")
+                        subquery_sql = self._process_subquery_pattern(
+                            subquery_sql,
+                            curly_pattern,
+                            "curly bracket subquery",
+                            merge_source_relation,
+                            merge_dest_relation
+                        )
+                elif pattern_name == "curly bracket subquery":
+                    # Process DREMIO_SUBQUERY patterns in the extracted subquery SQL
+                    dremio_pattern = r'/\*\s*DREMIO_SUBQUERY:\s*(.*?)\s*\*/'
+                    if re.search(dremio_pattern, subquery_sql, flags=re.DOTALL):
+                        logger.debug(f"Found DREMIO_SUBQUERY pattern inside {pattern_name}, processing it first")
+                        subquery_sql = self._process_subquery_pattern(
+                            subquery_sql,
+                            dremio_pattern,
+                            "DREMIO_SUBQUERY",
+                            merge_source_relation,
+                            merge_dest_relation
+                        )
+                
                 # Execute the sub-query using a new cursor to avoid state conflicts
                 # Skip DREMIO_SUBQUERY substitution to prevent infinite recursion
                 subquery_cursor = DremioCursor(self._rest_client)
@@ -288,14 +356,14 @@ class DremioCursor:
                 schema = job_results.get("schema", [])
                 
                 if len(schema) == 0:
-                    raise Exception(f"DREMIO_SUBQUERY returned no schema information: {subquery_sql}")
+                    raise Exception(f"{pattern_name} returned no schema information: {subquery_sql}")
                 
                 # Get data type from first column
                 data_type = schema[0].get("type", {}).get("name", "VARCHAR")
                 
                 # Get all rows from the table
                 if subquery_cursor.table is None:
-                    raise Exception(f"DREMIO_SUBQUERY returned no results: {subquery_sql}")
+                    raise Exception(f"{pattern_name} returned no results: {subquery_sql}")
                 
                 rows = subquery_cursor.table.rows
                 num_rows = len(rows)
@@ -303,14 +371,14 @@ class DremioCursor:
                 
                 if num_rows == 0:
                     # Handle empty result set gracefully - return NULL
-                    logger.debug(f"DREMIO_SUBQUERY returned no rows: {subquery_sql}")
+                    logger.debug(f"{pattern_name} returned no rows: {subquery_sql}")
                     logger.debug("Empty result - returning NULL")
                     return "NULL"
                 
                 # Warn if multiple columns (use first column)
                 if num_cols > 1:
                     logger.warning(
-                        f"DREMIO_SUBQUERY returned {num_cols} columns, using first column only: {subquery_sql}"
+                        f"{pattern_name} returned {num_cols} columns, using first column only: {subquery_sql}"
                     )
                 
                 # Extract values from first column
@@ -320,7 +388,7 @@ class DremioCursor:
                         values.append(row[0])
                 
                 if len(values) == 0:
-                    raise Exception(f"DREMIO_SUBQUERY returned no values: {subquery_sql}")
+                    raise Exception(f"{pattern_name} returned no values: {subquery_sql}")
                 
                 # Format based on number of rows
                 if num_rows == 1:
@@ -329,7 +397,7 @@ class DremioCursor:
                     # If used in IN clause and there's no opening paren already, wrap in parentheses
                     if is_in_clause and not has_opening_paren:
                         formatted_result = f"({formatted_result})"
-                    logger.debug(f"DREMIO_SUBQUERY result (single value, type={data_type}): {formatted_result}")
+                    logger.debug(f"{pattern_name} result (single value, type={data_type}): {formatted_result}")
                     return formatted_result
                 else:
                     # Multiple values for IN() clause
@@ -337,12 +405,12 @@ class DremioCursor:
                     # Only wrap in parentheses if there's no opening paren already
                     if not has_opening_paren:
                         formatted_result = f"({formatted_result})"
-                    logger.debug(f"DREMIO_SUBQUERY result ({num_rows} values, type={data_type}): {formatted_result[:200]}...")
-                    logger.debug(f"Full DREMIO_SUBQUERY result: {formatted_result}")
+                    logger.debug(f"{pattern_name} result ({num_rows} values, type={data_type}): {formatted_result[:200]}...")
+                    logger.debug(f"Full {pattern_name} result: {formatted_result}")
                     return formatted_result
                     
             except Exception as e:
-                error_msg = f"Error executing DREMIO_SUBQUERY '{subquery_sql}': {str(e)}"
+                error_msg = f"Error executing {pattern_name} '{subquery_sql}': {str(e)}"
                 logger.error(error_msg)
                 raise Exception(error_msg)
             finally:
@@ -355,12 +423,12 @@ class DremioCursor:
         
         # Find all matches and replace them
         try:
-            result_sql = re.sub(pattern, replace_subquery, sql, flags=re.DOTALL)
+            result_sql = re.sub(pattern, replace_subquery, sql, flags=re.DOTALL | re.IGNORECASE)
             if result_sql != sql:
-                logger.debug("DREMIO_SUBQUERY substitution successful")
+                logger.debug(f"{pattern_name} substitution successful")
             return result_sql
         except Exception as e:
-            logger.error(f"Error during DREMIO_SUBQUERY substitution: {str(e)}")
+            logger.error(f"Error during {pattern_name} substitution: {str(e)}")
             # Re-raise to fail the query rather than silently continuing
             raise
 

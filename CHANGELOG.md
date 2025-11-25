@@ -3,6 +3,7 @@
 ## Features
 
 - **DREMIO_SUBQUERY**: Added support for dynamic query result substitution using `/* DREMIO_SUBQUERY: ... */` syntax. This feature allows you to substitute the results of a subquery directly into your SQL before execution, particularly useful for Iceberg table pruning and incremental predicates. See [documentation](docs/dremio_subquery.md) for details.
+- **DREMIO_SUBQUERY - Curly Bracket Syntax**: Added support for alternative curly bracket syntax `{ SELECT ... }` as an alternative to the comment syntax. Both syntaxes are functionally equivalent and can be nested together (e.g., a `DREMIO_SUBQUERY` comment can contain a curly bracket subquery). This enables more flexible and concise syntax options for dynamic query substitution.
 
 ## Changes
 

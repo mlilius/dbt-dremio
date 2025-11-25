@@ -9,15 +9,37 @@ The `DREMIO_SUBQUERY` feature allows you to dynamically substitute query results
 
 ## Overview
 
-`DREMIO_SUBQUERY` uses a special SQL comment syntax that gets replaced with the actual results of executing that subquery. The substitution happens automatically before the SQL is sent to Dremio, enabling dynamic predicate values that can optimize query performance through partition pruning.
+`DREMIO_SUBQUERY` uses special syntax that gets replaced with the actual results of executing that subquery. The substitution happens automatically before the SQL is sent to Dremio, enabling dynamic predicate values that can optimize query performance through partition pruning.
 
 ## Syntax
+
+Two syntax options are available:
+
+### Option 1: Comment Syntax (Recommended)
 
 ```sql
 /* DREMIO_SUBQUERY: <your_subquery_here> */
 ```
 
-The subquery must return a single column. If it returns multiple rows, the values will be formatted as a comma-separated list suitable for `IN()` clauses.
+This is the recommended syntax as it's more explicit and less likely to conflict with other SQL constructs.
+
+### Option 2: Curly Bracket Syntax
+
+```sql
+{ SELECT <your_subquery_here> }
+```
+
+This syntax is more concise and can be useful in certain contexts. Both syntaxes are functionally equivalent.
+
+**Note:** The subquery must return a single column. If it returns multiple rows, the values will be formatted as a comma-separated list suitable for `IN()` clauses.
+
+### Choosing Between Syntaxes
+
+- **Comment syntax** (`/* DREMIO_SUBQUERY: ... */`): Recommended for most use cases. More explicit and less likely to conflict with other SQL constructs. Better for readability in complex queries.
+
+- **Curly bracket syntax** (`{ SELECT ... }`): More concise and can be useful when you want a cleaner look. Particularly useful when nesting inside `DREMIO_SUBQUERY` comments to avoid comment nesting issues.
+
+Both syntaxes support the same features and can be used interchangeably or even nested together.
 
 ## Usage Examples
 
@@ -37,13 +59,30 @@ WHERE
     AND status IN (/* DREMIO_SUBQUERY: SELECT DISTINCT status FROM {{ ref('status_lookup') }} WHERE is_active = true */)
 ```
 
+**Using curly bracket syntax:**
+
+```sql
+SELECT 
+    id,
+    name,
+    created_date,
+    status
+FROM {{ ref('source_table') }}
+WHERE 
+    created_date >= { SELECT MAX(last_processed_date) FROM {{ ref('processing_log') }} }
+    AND status IN ({ SELECT DISTINCT status FROM {{ ref('status_lookup') }} WHERE is_active = true })
+```
+
 ### Single Value Substitution
 
 For single values, the result is substituted directly. Useful for date ranges, thresholds, or lookup values:
 
 ```sql
--- Get the latest partition date
+-- Get the latest partition date (comment syntax)
 WHERE partition_date = /* DREMIO_SUBQUERY: SELECT MAX(partition_date) FROM {{ this }} */
+
+-- Get the latest partition date (curly bracket syntax)
+WHERE partition_date = { SELECT MAX(partition_date) FROM {{ this }} }
 
 -- Use a threshold value from a config table
 WHERE amount > /* DREMIO_SUBQUERY: SELECT threshold_value FROM {{ ref('config_table') }} WHERE config_key = 'min_amount' */
@@ -195,11 +234,25 @@ WHERE date IN (NULL)
 
 5. **Error Handling**: If a subquery fails, the entire query will fail with a clear error message indicating which `DREMIO_SUBQUERY` failed.
 
+### Nested Patterns
+
+You can nest patterns - for example, a `DREMIO_SUBQUERY` comment can contain a curly bracket subquery:
+
+```sql
+/* DREMIO_SUBQUERY: 
+   SELECT DISTINCT DATE_TRUNC('day', sessionTimestamp) 
+   FROM {{ ref('events_v1_bronze') }}
+   WHERE freshness > TIMESTAMP { SELECT MAX(freshness) FROM {{ this }} }
+*/
+```
+
+The inner curly bracket pattern will be processed first, then the outer `DREMIO_SUBQUERY` pattern. This allows for complex dynamic queries where you need to compute values based on other computed values.
+
 ## Limitations
 
-- Subqueries cannot contain nested `DREMIO_SUBQUERY` patterns (recursion is prevented)
 - Only the first column of multi-column results is used
 - The feature is specific to dbt-dremio and will be ignored by other adapters
+- Curly bracket syntax `{ SELECT ... }` requires the SELECT keyword immediately after the opening brace
 
 ## Debugging
 
@@ -209,9 +262,10 @@ To see the final SQL after substitution, run dbt with the `--debug` flag:
 dbt run --select your_model --debug
 ```
 
-Look for log messages containing "DREMIO_SUBQUERY" to see:
+Look for log messages containing "DREMIO_SUBQUERY" or "curly bracket subquery" to see:
 - Pattern detection
 - MERGE context extraction
+- Nested pattern processing
 - Subquery execution
 - Final substituted SQL
 
@@ -295,4 +349,18 @@ FROM {{ ref('raw_events') }}
 ```
 
 This will automatically filter the merge operation to only process rows where the date exists in the new data, enabling efficient partition pruning on Iceberg tables.
+
+### Example 5: Nested Patterns
+
+This example demonstrates using nested patterns where a `DREMIO_SUBQUERY` contains a curly bracket subquery:
+
+```sql
+/* DREMIO_SUBQUERY: 
+   SELECT DISTINCT DATE_TRUNC('day', sessionTimestamp) 
+   FROM {{ ref('events_v1_bronze') }}
+   WHERE freshness > TIMESTAMP { SELECT MAX(freshness) FROM {{ this }} }
+*/
+```
+
+The inner curly bracket pattern `{ SELECT MAX(freshness) FROM {{ this }} }` is processed first, then the outer `DREMIO_SUBQUERY` pattern uses that result in its WHERE clause.
 
